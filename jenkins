@@ -1,0 +1,89 @@
+pipeline {
+  agent { label 'test' }
+
+  environment {
+    SONARQUBE_ENV = 'sonar'  // Replace with your SonarQube server name configured in Jenkins
+    dockerimagename = "registry.hub.docker.com/azeemjj/nodeapp"  // Set this to your Docker image name
+  }
+
+  stages {
+
+    stage('Checkout Source') {
+      steps {
+        git 'https://github.com/azeemjj/nodeapptest.git'
+      }
+    }
+
+    stage('SonarQube - Static Code Analysis') {
+      steps {
+        withSonarQubeEnv("${SONARQUBE_ENV}") {
+          sh 'sonar-scanner'
+        }
+      }
+    }
+
+    stage('OWASP Dependency Check') {
+      steps {
+        dependencyCheck additionalArguments: '--scan . --format XML --out dependency-check-report',
+                odcInstallation: 'DC'
+
+      }
+    }
+
+    stage('Publish OWASP Report') {
+      steps {
+        dependencyCheckPublisher pattern: 'dependency-check-report/dependency-check-report.xml'
+      }
+    }
+
+    stage('Trivy - Docker Image Scan') {
+      steps {
+        script {
+          // JSON report
+          sh "trivy image --format json --output trivy-report.json registry.hub.docker.com/azeemjj/nodeapp:16"
+
+          // HTML report using downloaded template
+          sh '''
+            curl -sSL -o html.tpl https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/html.tpl
+            trivy image --format template \
+              --template "@html.tpl" \
+              --output trivy-report.html \
+              registry.hub.docker.com/azeemjj/nodeapp:16
+          '''
+
+          archiveArtifacts artifacts: 'trivy-report.json', allowEmptyArchive: true
+        }
+      }
+    }
+
+    stage('Publish Trivy HTML Report') {
+      steps {
+        publishHTML(target: [
+          reportName: 'Trivy Report',
+          reportDir: '.',  // Assuming report is in the workspace root
+          reportFiles: 'trivy-report.html',
+          keepAll: true,
+          alwaysLinkToLastBuild: true,
+          allowMissing: false
+        ])
+      }
+    }
+
+    stage('Deploying App to Kubernetes') {
+      steps {
+        script {
+          kubernetesDeploy(
+            configs: "deploymentservice.yml",
+            kubeconfigId: "kubernetes"
+          )
+        }
+      }
+    }
+  }
+
+  post {
+    always {
+      echo 'Pipeline completed.'
+    }
+  }
+}
